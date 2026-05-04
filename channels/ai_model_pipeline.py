@@ -141,22 +141,24 @@ def create_reel_from_image(image_path: str, content: dict, duration: int = 15) -
     filter_complex = (
         f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
         f"crop=1080:1920,"
-        f"zoompan=z='min(zoom+0.0005,1.3)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={duration*25}:s=1080x1920:fps=25,"
         f"drawtext=text='{quote}'"
         f":fontsize=56:fontcolor=white:bordercolor=black@0.8:borderw=3"
         f":x=(w-text_w)/2:y=h*0.75"
         f":box=1:boxcolor=black@0.4:boxborderw=15"
-        f":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf,"
-        f"vignette=PI/4[out]"
+        f":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf[out]"
     )
 
     cmd = base_cmd + ["-filter_complex", filter_complex, "-map", "[out]"]
     if voice_path:
-        cmd += ["-map", "1:a", "-c:a", "aac", "-shortest"]
+        cmd += ["-map", "1:a", "-c:a", "aac", "-b:a", "128k", "-shortest"]
 
     cmd += [
         "-t", str(duration),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "fast",
+        "-b:v", "3500k", "-maxrate", "3500k", "-bufsize", "7000k",
+        "-r", "30", "-g", "60",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         str(out_path)
     ]
 
