@@ -191,7 +191,11 @@ def create_split_screen_video(content: dict, duration: int = 45) -> str:
 
     cmd += [
         "-t", str(duration),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "fast",
+        "-b:v", "3500k", "-maxrate", "3500k", "-bufsize", "7000k",
+        "-r", "30", "-g", "60",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         str(out_path)
     ]
 
