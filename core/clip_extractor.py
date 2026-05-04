@@ -75,11 +75,25 @@ Return ONLY valid JSON array."""
     clips = json.loads(raw)
 
     validated = []
-    for clip in clips[:4]:
-        start = max(0, float(clip["start_sec"]))
-        end   = min(audio_duration, float(clip["end_sec"]))
-        if end - start < 20:
-            end = min(audio_duration, start + 45)
+    # For short audio (TTS fallback), generate evenly spaced clips within duration
+    clip_len = min(30, audio_duration / 4) if audio_duration < 120 else 45
+
+    for i, clip in enumerate(clips[:4]):
+        if audio_duration < 120:
+            # Short audio — slice it into equal quarters, ignore AI timestamps
+            start = max(0, (audio_duration / 4) * i)
+            end   = min(audio_duration, start + clip_len)
+        else:
+            start = max(0, float(clip["start_sec"]))
+            end   = min(audio_duration, float(clip["end_sec"]))
+
+        # Ensure minimum 10s clip and end doesn't exceed duration
+        if end - start < 10:
+            end = min(audio_duration, start + clip_len)
+        if start >= audio_duration:
+            start = max(0, audio_duration - clip_len)
+            end   = audio_duration
+
         clip["start_sec"] = start
         clip["end_sec"]   = end
         clip["duration"]  = end - start
