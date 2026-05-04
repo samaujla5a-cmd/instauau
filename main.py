@@ -64,8 +64,10 @@ def run_full_pipeline(dry_run=False):
         logger.info(f"[4/4] Uploading {len(clips)} reels...")
         for i, clip in enumerate(clips[:4]):
             try:
-                clip_audio = os.path.join(SONGS_DIR, f"{concept['title'].replace(' ','_')}_clip{i+1}.mp3")
-                trim_audio_clip(audio_path, clip["start_sec"], clip["end_sec"], clip_audio)
+                clip_audio  = os.path.join(SONGS_DIR, f"{concept['title'].replace(' ','_')}_clip{i+1}.mp3")
+                safe_start  = min(clip["start_sec"], max(0, audio_duration - 5))
+                safe_end    = min(clip["end_sec"], audio_duration)
+                trim_audio_clip(audio_path, safe_start, safe_end, clip_audio)
                 short_path = create_short_video(clip_audio, concept, i, clip["start_sec"], clip["end_sec"] - clip["start_sec"])
                 caption    = f"🎵 {concept['title']} — Part {i+1}\n\n{hashtags}"
 
