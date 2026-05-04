@@ -143,7 +143,17 @@ def create_split_screen_video(content: dict, duration: int = 45) -> str:
     # FIX: generate TTS voiceover so the video has audio
     voice_path = generate_voiceover(hook, points, session)
 
-    hook_safe = hook.replace("'", "\\'").replace(":", "\\:")
+    def _esc(text):
+        # Remove quotes entirely, escape special ffmpeg drawtext chars
+        return (text.replace("'", "")
+                    .replace('"', '')
+                    .replace(":", "\\:")
+                    .replace("%", "\\%")
+                    .replace("[", "")
+                    .replace("]", "")
+                    .replace(",", " "))
+
+    hook_safe = _esc(hook)
     drawtext_filters = [
         f"drawtext=text='{hook_safe}'"
         f":fontsize=52:fontcolor=yellow:bordercolor=black:borderw=3"
@@ -155,14 +165,14 @@ def create_split_screen_video(content: dict, duration: int = 45) -> str:
     for i, point in enumerate(points[:5]):
         start_time = 3 + (i * 7)
         end_time   = start_time + 6
-        safe_point = point.replace("'", "\\'").replace(":", "\\:")
+        safe_point = _esc(point)
         y_pos = 900 + (i * 80)
         drawtext_filters.append(
             f"drawtext=text='{safe_point}'"
             f":fontsize=38:fontcolor=white:bordercolor=black:borderw=2"
             f":x=(w-text_w)/2:y={y_pos}"
             f":box=1:boxcolor=black@0.6:boxborderw=8"
-            f":enable='between(t,{start_time},{end_time})'"
+            f":enable='between(t\\,{start_time}\\,{end_time})'"
             f":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
         )
 
