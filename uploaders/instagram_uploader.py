@@ -109,15 +109,17 @@ def _wait_for_processing(creation_id: str, token: str, max_wait_sec: int = 300):
     for _ in range(max_wait_sec // 10):
         resp = requests.get(
             f"{GRAPH_BASE}/{creation_id}",
-            params={"fields": "status_code,status", "access_token": token}, timeout=30,
+            params={"fields": "status_code,status,error_message", "access_token": token}, timeout=30,
         )
         data = resp.json()
         status = data.get("status_code", "UNKNOWN")
+        error_msg = data.get("error_message", "no details")
         logger.info(f"  Status: {status}")
         if status == "FINISHED":
             return
         if status in ("ERROR", "EXPIRED"):
-            raise RuntimeError(f"Instagram rejected the video: {data.get('status')}")
+            logger.error(f"Instagram rejection detail: {error_msg} | Full response: {data}")
+            raise RuntimeError(f"Instagram rejected the video: {error_msg}")
         time.sleep(10)
     raise TimeoutError("Video processing timed out after 5 minutes.")
 
