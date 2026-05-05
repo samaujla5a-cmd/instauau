@@ -2,9 +2,9 @@
 ╔══════════════════════════════════════════════════════════╗
 ║         MUSIC GENERATOR — FREE API Edition              ║
 ║                                                          ║
-║  Mode A: Suno AI (Browser-Token auth — current method)  ║
-║  Mode B: MusicGen local (Meta open-source, 100% free)   ║
-║  Mode C: edge-tts voice + royalty-free beat (free)      ║
+║  Mode A: Suno AI (Browser-Token auth)                   ║
+║  Mode B: TTS.ai (Kokoro — natural voice, free API)      ║
+║  Mode C: edge-tts voice (fallback)                      ║
 ╚══════════════════════════════════════════════════════════╝
 """
 
@@ -20,109 +20,66 @@ from config import SUNO_COOKIE, SONGS_DIR, MUSIC_MODE, TTS_MODE, EDGE_TTS_VOICE,
 logger = logging.getLogger(__name__)
 os.makedirs(SONGS_DIR, exist_ok=True)
 
-# ── Read Suno Browser-Token from env ─────────────────────
-# In .env set either:
-#   SUNO_BROWSER_TOKEN=eyJ0aW1lc3RhbXAiOjE3...   (newer method)
-#   SUNO_COOKIE=_session=xxx...                    (older method)
 SUNO_BROWSER_TOKEN = os.getenv("SUNO_BROWSER_TOKEN", SUNO_COOKIE)
+TTSAI_API_KEY      = os.getenv("TTSAI_API_KEY", "")
 
 
 # ══════════════════════════════════════════════════════════
-#  MAIN ENTRY — auto-routes based on MUSIC_MODE in .env
+#  MAIN ENTRY
 # ══════════════════════════════════════════════════════════
 
 def generate_song(concept: dict, suno_prompt: str) -> str:
     """
-    Generate full song. Routes to correct backend based on MUSIC_MODE:
-      suno_cookie    → Suno AI (Browser-Token auth, current)
-      musicgen_local → Meta's MusicGen running locally (100% free)
-      gtts_only      → gTTS / edge-tts voice only
-    Returns path to final .mp3
+    Route based on MUSIC_MODE env var:
+      suno / suno_cookie  → Suno AI
+      tts_ai              → TTS.ai Kokoro (natural voice, recommended free option)
+      gtts_only / edge_tts → edge-tts fallback
     """
-    if MUSIC_MODE in ("suno_cookie", "suno"):
-        return generate_song_suno(concept, suno_prompt)
-    elif MUSIC_MODE == "musicgen_local":
-        return generate_song_musicgen(concept, suno_prompt)
-    else:
-        return generate_voice_only(concept)
+    if MUSIC_MODE in ("suno_cookie", "suno") and SUNO_BROWSER_TOKEN:
+        try:
+            return generate_song_suno(concept, suno_prompt)
+        except Exception as e:
+            logger.warning(f"Suno failed ({e}), falling back to TTS.ai...")
+
+    # TTS.ai — primary free option
+    if TTSAI_API_KEY or MUSIC_MODE == "tts_ai":
+        try:
+            return generate_ttsai(concept)
+        except Exception as e:
+            logger.warning(f"TTS.ai failed ({e}), falling back to edge-tts...")
+
+    return generate_voice_only(concept)
 
 
 # ══════════════════════════════════════════════════════════
-#  MODE A: SUNO AI — Browser-Token method (current/working)
+#  MODE A: SUNO AI
 # ══════════════════════════════════════════════════════════
 
 def _build_suno_headers() -> dict:
-    """
-    Build correct Suno request headers.
-    Suno now uses Browser-Token + Authorization instead of cookies.
-
-    How to get your Browser-Token:
-    1. Go to suno.com, log in (free account)
-    2. Press F12 → Network tab → click any request to studio-api-prod.suno.com
-    3. Look in Request Headers for:
-         Browser-Token: eyJ0aW1lc3RhbXAiOi...
-       OR
-         Authorization: Bearer eyJhbGci...
-    4. Copy the Browser-Token value into SUNO_BROWSER_TOKEN in your .env
-    """
     token = SUNO_BROWSER_TOKEN.strip()
-
-    # If it looks like a raw JWT/browser token (starts with eyJ)
-    # wrap it in the JSON format Suno expects
     if token.startswith("eyJ") and not token.startswith('{"'):
         browser_token_header = f'{{"token":"{token}"}}'
     else:
         browser_token_header = token
-
     return {
         "Host":            "studio-api-prod.suno.com",
         "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0",
         "Accept":          "*/*",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
         "Referer":         "https://suno.com/",
         "Origin":          "https://suno.com",
         "Browser-Token":   browser_token_header,
         "Content-Type":    "application/json",
         "Connection":      "keep-alive",
-        "Sec-Fetch-Dest":  "empty",
-        "Sec-Fetch-Mode":  "cors",
-        "Sec-Fetch-Site":  "same-site",
     }
-
-# Keep old name for backward compatibility
-SUNO_HEADERS = {
-    "Cookie": SUNO_COOKIE,
-    "Content-Type": "application/json",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer": "https://suno.ai/",
-    "Origin": "https://suno.ai",
-}
 
 
 def generate_song_suno(concept: dict, prompt: str) -> str:
-    """
-    Generate song via Suno AI using Browser-Token (current auth method).
-    Free account: ~10 songs/day. No credit card needed.
-
-    How to get your Browser-Token:
-    1. Go to suno.com, log in (free account is fine)
-    2. Press F12 → Network tab → Enable "Raw" toggle on headers
-    3. Click Create on Suno, let it start generating
-    4. Click any request to studio-api-prod.suno.com
-    5. In Request Headers, find:
-         Browser-Token: eyJ0aW1lc3RhbXAiOi...
-    6. Copy that value → paste into SUNO_BROWSER_TOKEN in your .env
-    """
     if not SUNO_BROWSER_TOKEN:
-        logger.warning("SUNO_BROWSER_TOKEN not set — falling back to TTS-only mode")
-        return generate_voice_only(concept)
+        raise RuntimeError("SUNO_BROWSER_TOKEN not set")
 
     logger.info("🎵 Generating with Suno AI (Browser-Token mode)...")
-
     headers = _build_suno_headers()
-
-    # Refresh session first
     _suno_refresh_session(headers)
 
     payload = {
@@ -135,24 +92,12 @@ def generate_song_suno(concept: dict, prompt: str) -> str:
 
     resp = requests.post(
         "https://studio-api-prod.suno.com/api/generate/v2/",
-        headers=headers,
-        json=payload,
-        timeout=30,
+        headers=headers, json=payload, timeout=30,
     )
-
     if resp.status_code == 401:
-        raise RuntimeError(
-            "❌ Suno token expired or invalid!\n"
-            "Fix: F12 → Network → any request to studio-api-prod.suno.com\n"
-            "     → Request Headers → copy Browser-Token value\n"
-            "     → paste into SUNO_BROWSER_TOKEN in your .env"
-        )
+        raise RuntimeError("❌ Suno token expired or invalid!")
     if resp.status_code == 403:
-        raise RuntimeError(
-            "❌ Suno returned 403 Forbidden.\n"
-            "Make sure you are logged into suno.com in your browser\n"
-            "and re-copy the Browser-Token from a fresh request."
-        )
+        raise RuntimeError("❌ Suno returned 403 Forbidden.")
     resp.raise_for_status()
 
     data     = resp.json()
@@ -170,15 +115,10 @@ def generate_song_suno(concept: dict, prompt: str) -> str:
 
 
 def _suno_refresh_session(headers: dict):
-    """Keep Suno session alive."""
     try:
-        requests.get(
-            "https://studio-api-prod.suno.com/api/session/",
-            headers=headers,
-            timeout=10
-        )
+        requests.get("https://studio-api-prod.suno.com/api/session/", headers=headers, timeout=10)
     except Exception:
-        pass  # Non-critical
+        pass
 
 
 def _poll_suno(clip_id: str, headers: dict, max_wait: int = 300) -> str:
@@ -200,154 +140,144 @@ def _poll_suno(clip_id: str, headers: dict, max_wait: int = 300) -> str:
 
 
 # ══════════════════════════════════════════════════════════
-#  MODE B: META MUSICGEN (Local — 100% Free, No Limits)
+#  MODE B: TTS.AI — Kokoro (Natural voice, free API)
+#
+#  Sign up free at tts.ai → get API key → add TTSAI_API_KEY
+#  Free: 5,000 chars/day without key, 15,000 with free account
+#  Kokoro sounds very natural — not robotic like edge-tts
 # ══════════════════════════════════════════════════════════
 
-def generate_song_musicgen(concept: dict, prompt: str) -> str:
+def generate_ttsai(concept: dict) -> str:
     """
-    Generate music locally using Meta's MusicGen.
-    100% free, unlimited, runs on CPU or GPU.
+    Generate natural-sounding voice using TTS.ai Kokoro model.
+    Much better quality than edge-tts, free with API key.
 
-    Install: pip install audiocraft
-    Model downloads automatically (~3-7GB first run).
-
-    CPU: ~5-15 min per song. GPU (4GB VRAM): ~1-3 min.
+    Get free API key at: https://tts.ai
+    Add to Railway vars: TTSAI_API_KEY=sk-tts-your-key
     """
-    try:
-        from audiocraft.models import MusicGen
-        from audiocraft.data.audio import audio_write
-    except ImportError:
-        raise ImportError(
-            "audiocraft not installed.\n"
-            "Run: pip install audiocraft\n"
-            "Or switch MUSIC_MODE=suno_cookie in .env"
-        )
+    lyrics = concept.get("full_lyrics", concept.get("hook", ""))
+    # Trim to safe length (TTS.ai free: 5000 chars/day)
+    lyrics = lyrics[:3000]
 
-    logger.info("🎵 Generating music with MusicGen (local, free)...")
+    out_path = os.path.join(SONGS_DIR, f"{_safe_name(concept['title'])}.mp3")
 
-    # Use small model for speed; "medium" or "large" for better quality
-    model = MusicGen.get_pretrained("facebook/musicgen-small")
-    model.set_generation_params(duration=180)  # 3 min song
+    logger.info("🎙️ Generating voice with TTS.ai (Kokoro)...")
 
-    # Build a rich music prompt from the concept
-    music_prompt = (
-        f"trippy lo-fi hip-hop rap beat, {concept.get('suno_prompt', '')[:200]}, "
-        f"psychedelic, weed vibe, 80 BPM, dark atmospheric, bass heavy, "
-        f"808 drums, vinyl crackle, chill trap production"
+    headers = {"Content-Type": "application/json"}
+    if TTSAI_API_KEY:
+        headers["Authorization"] = f"Bearer {TTSAI_API_KEY}"
+
+    payload = {
+        "model":  "kokoro",
+        "text":   lyrics,
+        "voice":  "am_adam",   # Natural male voice — good for rap
+        "format": "mp3",
+    }
+
+    # Submit job
+    resp = requests.post(
+        "https://api.tts.ai/v1/tts/",
+        headers=headers,
+        json=payload,
+        timeout=30,
     )
 
-    # Generate (returns torch tensor)
-    wav = model.generate([music_prompt])
+    if resp.status_code == 429:
+        raise RuntimeError("TTS.ai rate limit hit — try again later or upgrade")
+    if resp.status_code == 401:
+        raise RuntimeError("TTS.ai invalid API key — check TTSAI_API_KEY")
+    resp.raise_for_status()
 
-    out_path = os.path.join(SONGS_DIR, _safe_name(concept["title"]))
-    audio_write(
-        out_path, wav[0].cpu(),
-        model.sample_rate,
-        strategy="loudness",
-        loudness_compressor=True,
-    )
-    final_path = out_path + ".wav"
-    # Convert to mp3 for compatibility
-    mp3_path = out_path + ".mp3"
-    _ffmpeg_convert(final_path, mp3_path)
+    data = resp.json()
+    uuid = data.get("uuid")
+    if not uuid:
+        raise RuntimeError(f"TTS.ai gave no UUID: {data}")
 
-    logger.info(f"✅ MusicGen song created: {mp3_path}")
-    return mp3_path
+    logger.info(f"  🕐 TTS.ai job {uuid} — polling for result...")
+
+    # Poll for completion
+    for attempt in range(60):  # max 2 min
+        time.sleep(2)
+        result = requests.get(
+            "https://api.tts.ai/v1/speech/results/",
+            params={"uuid": uuid},
+            headers=headers,
+            timeout=15,
+        ).json()
+
+        status = result.get("status")
+        if status == "completed":
+            result_url = result.get("result_url")
+            if not result_url:
+                raise RuntimeError("TTS.ai completed but no result_url")
+            # Download the audio
+            audio_resp = requests.get(result_url, timeout=60)
+            audio_resp.raise_for_status()
+            with open(out_path, "wb") as f:
+                f.write(audio_resp.content)
+            logger.info(f"✅ TTS.ai voice generated: {out_path}")
+            return out_path
+        elif status == "failed":
+            raise RuntimeError(f"TTS.ai generation failed: {result.get('error')}")
+        else:
+            logger.info(f"  ⏳ TTS.ai status: {status} (attempt {attempt+1})")
+
+    raise TimeoutError("TTS.ai timed out after 2 minutes")
 
 
 # ══════════════════════════════════════════════════════════
-#  MODE C: FREE TTS VOICE GENERATION
+#  MODE C: EDGE-TTS FALLBACK
 # ══════════════════════════════════════════════════════════
 
 def generate_voice_only(concept: dict) -> str:
-    """
-    Generate voice-only track using free TTS.
-    Routes to edge-tts (best quality) or gTTS (fallback).
-    """
-    lyrics = concept.get("full_lyrics", "")
+    lyrics   = concept.get("full_lyrics", "")
     out_path = os.path.join(SONGS_DIR, f"{_safe_name(concept['title'])}.mp3")
-
-    if TTS_MODE == "edge_tts":
+    if TTS_MODE == "edge_tts" or True:  # always try edge_tts first
         return _edge_tts(lyrics, out_path)
-    else:
-        return _gtts(lyrics, out_path)
 
 
 def _edge_tts(text: str, out_path: str) -> str:
-    """
-    Microsoft Edge TTS — FREE, high quality neural voices.
-    Install: pip install edge-tts
-    Voices: en-US-GuyNeural, en-US-DavisNeural, en-US-TonyNeural
-    """
     try:
         import edge_tts
 
         async def _generate():
             communicate = edge_tts.Communicate(
-                text,
-                EDGE_TTS_VOICE,
-                rate=EDGE_TTS_RATE,
-                pitch=EDGE_TTS_PITCH,
+                text, EDGE_TTS_VOICE, rate=EDGE_TTS_RATE, pitch=EDGE_TTS_PITCH,
             )
             await communicate.save(out_path)
 
         asyncio.run(_generate())
         logger.info(f"✅ edge-tts voice generated: {out_path}")
         return out_path
-
     except ImportError:
-        logger.warning("edge-tts not installed, falling back to gTTS. Run: pip install edge-tts")
         return _gtts(text, out_path)
 
 
 def _gtts(text: str, out_path: str) -> str:
-    """
-    Google Translate TTS — FREE, simple, slightly robotic.
-    Install: pip install gtts
-    """
-    try:
-        from gtts import gTTS
-        tts = gTTS(text=text, lang="en", slow=False)
-        tts.save(out_path)
-        logger.info(f"✅ gTTS voice generated: {out_path}")
-        return out_path
-    except ImportError:
-        raise ImportError("No TTS available. Run: pip install edge-tts gtts")
+    from gtts import gTTS
+    tts = gTTS(text=text, lang="en", slow=False)
+    tts.save(out_path)
+    logger.info(f"✅ gTTS voice generated: {out_path}")
+    return out_path
 
 
 # ══════════════════════════════════════════════════════════
-#  BEAT MIXER — Mix voice over royalty-free beat
+#  BEAT MIXER
 # ══════════════════════════════════════════════════════════
 
 def mix_voice_and_beat(voice_path: str, beat_path: str, out_path: str,
                        voice_vol: float = 1.0, beat_vol: float = 0.5) -> str:
-    """
-    Mix voice track with a beat using pydub.
-    Provide your own royalty-free beat .mp3 as beat_path.
-
-    Free beat sources:
-    - looperman.com (free loops)
-    - freemusicarchive.org
-    - pixabay.com/music (free commercial license)
-    - YouTube Audio Library
-    """
     from pydub import AudioSegment
-
     logger.info("🎚️ Mixing voice + beat...")
     voice = AudioSegment.from_file(voice_path)
     beat  = AudioSegment.from_file(beat_path)
-
-    # Loop beat to match voice duration
     if len(beat) < len(voice):
         repeats = (len(voice) // len(beat)) + 2
         beat = beat * repeats
-    beat = beat[:len(voice)]
-
-    # dB adjustments
+    beat      = beat[:len(voice)]
     voice_adj = voice + (20 * voice_vol - 20)
     beat_adj  = beat  + (20 * beat_vol  - 20)
-
-    mixed = voice_adj.overlay(beat_adj)
+    mixed     = voice_adj.overlay(beat_adj)
     mixed.export(out_path, format="mp3", bitrate="320k")
     logger.info(f"✅ Mix complete: {out_path}")
     return out_path
@@ -371,13 +301,12 @@ def _safe_name(title: str) -> str:
 
 
 def _ffmpeg_convert(src: str, dst: str) -> None:
-    """Convert audio via ffmpeg (must be installed)."""
     subprocess.run(
         ["ffmpeg", "-y", "-i", src, "-b:a", "320k", dst],
         check=True, capture_output=True
     )
 
 
-# Keep backward compatibility with original main.py
-generate_song_suno        = generate_song_suno
-generate_voice_elevenlabs = generate_voice_only   # redirect to free TTS
+# backward compat
+generate_voice_elevenlabs = generate_voice_only
+generate_song_musicgen    = generate_voice_only
