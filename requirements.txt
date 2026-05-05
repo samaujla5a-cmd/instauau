@@ -17,4 +17,4 @@ edge-tts>=6.1.9
 gtts>=2.4.0
 
 # NOTE: instagrapi and pyotp have been removed
-# Now using the official Instagram Graph API via requests only hii.
+# Now using the official Instagram Graph API via requests only .
