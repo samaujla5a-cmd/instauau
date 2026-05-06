@@ -1,241 +1,173 @@
 """
-BRAINROT PIPELINE
-Subway Surfers + Minecraft split screen
-Auto trending audio + AI viral text via Gemini Flash (free)
+BRAINROT PIPELINE — Subway + Minecraft split screen
 """
-import asyncio
-import os
-import re
-import json
-import random
-import logging
-import subprocess
-import tempfile
+import asyncio, os, re, json, random, logging, subprocess
 from pathlib import Path
 from datetime import datetime
-
 from core.gemini_client import gemini as _gemini
 
-logger = logging.getLogger("BRAINROT")
-
-BASE_DIR   = Path(__file__).parent.parent
-BRAIN_DIR  = BASE_DIR / "output" / "brainrot"
+logger    = logging.getLogger("BRAINROT")
+BASE_DIR  = Path(__file__).parent.parent
+BRAIN_DIR = BASE_DIR / "output" / "brainrot"
 BRAIN_DIR.mkdir(parents=True, exist_ok=True)
-
-# Local bundled fallback clips (commit short loops to assets/ to avoid yt-dlp on Railway)
 ASSETS_DIR = BASE_DIR / "assets"
-LOCAL_CLIPS = {
-    "subway":    ASSETS_DIR / "subway.mp4",
-    "minecraft": ASSETS_DIR / "minecraft.mp4",
-}
-
-BRAINROT_COLORS = {"subway": "#FF6B35", "minecraft": "#5D8A3C"}
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 VIRAL_TOPICS = [
     "sigma male rules nobody talks about",
     "things that hit different at 3am",
     "facts that sound fake but are real",
-    "things gen z will never understand",
-    "unwritten rules of life",
-    "things that are lowkey illegal",
     "mind blowing facts about space",
     "dark psychology tricks that actually work",
-    "things you didn't know about your brain",
+    "things you did not know about your brain",
     "life hacks that actually work",
     "facts about money nobody teaches you",
     "things that will make you question reality",
+    "unwritten rules of life",
+    "things that are lowkey illegal",
+    "facts gen z will never understand",
 ]
 
 
 def generate_viral_text() -> dict:
     topic = random.choice(VIRAL_TOPICS)
-    prompt = f"""Generate viral brainrot-style content for Instagram Reels about: "{topic}"
-
-Return ONLY a valid JSON object, no markdown, no extra text:
+    prompt = f"""Generate viral brainrot Instagram content about: "{topic}"
+Return ONLY valid JSON, no markdown:
 {{
-    "hook": "SHORT punchy hook text (max 8 words, ALL CAPS, no punctuation)",
-    "points": ["point 1 (max 10 words)", "point 2 (max 10 words)", "point 3 (max 10 words)", "point 4 (max 10 words)", "point 5 (max 10 words)"],
-    "caption": "Instagram caption with emojis and hashtags (200 chars max)",
+    "hook": "SHORT hook max 6 words ALL CAPS no apostrophes",
+    "points": ["point 1 max 8 words", "point 2 max 8 words", "point 3 max 8 words"],
+    "caption": "Instagram caption with emojis 150 chars max",
     "hashtags": ["#brainrot", "#viral", "#fyp", "#facts", "#mindblown"]
-}}
-
-Make it genuinely interesting and shareable. No asterisks, no markdown."""
-
-    text = _gemini(prompt)
-    text = re.sub(r"```json|```", "", text).strip()
+}}"""
+    text = re.sub(r"```json|```", "", _gemini(prompt)).strip()
     data = json.loads(text)
     data["topic"] = topic
     logger.info(f"Generated brainrot topic: {topic}")
     return data
 
 
-async def _make_tts_voice(text: str, out_path: str) -> None:
-    """Generate TTS voiceover using edge-tts."""
+async def _tts(text: str, path: str) -> None:
     import edge_tts
-    communicate = edge_tts.Communicate(text, "en-US-GuyNeural", rate="+15%")
-    await communicate.save(out_path)
+    await edge_tts.Communicate(text, "en-US-GuyNeural", rate="+15%").save(path)
 
 
 def generate_voiceover(hook: str, points: list, session: str) -> str | None:
-    """Create a TTS voiceover mp3. Returns path or None if edge-tts unavailable."""
     try:
-        voice_text = hook + ". " + ". ".join(points[:5])
-        voice_path = str(BRAIN_DIR / f"voice_{session}.mp3")
-        asyncio.run(_make_tts_voice(voice_text, voice_path))
-        logger.info(f"✅ Voiceover generated: {voice_path}")
-        return voice_path
+        voice_text = hook + ". " + ". ".join(points[:3])
+        path = str(BRAIN_DIR / f"voice_{session}.mp3")
+        asyncio.run(_tts(voice_text, path))
+        logger.info(f"✅ Voiceover: {path}")
+        return path
     except Exception as e:
-        logger.warning(f"TTS voiceover failed ({e}) — video will have no audio")
+        logger.warning(f"TTS failed: {e}")
         return None
 
 
-def get_background_clip(clip_type: str, duration: int = 30) -> str:
-    out_path = BRAIN_DIR / f"{clip_type}_{datetime.now().strftime('%H%M%S')}.mp4"
+def _safe_text(t: str) -> str:
+    return re.sub(r"[^A-Za-z0-9 ]", "", t)[:40].upper()
 
-    # FIX: Try local bundled clip first (Railway IPs are blocked by YouTube)
-    local = LOCAL_CLIPS.get(clip_type)
-    if local and local.exists():
-        logger.info(f"Using local bundled {clip_type} clip")
-        return str(local)
 
-    # Try yt-dlp (works locally, usually fails on Railway)
-    search_term = (
-        "subway surfers gameplay no commentary"
-        if clip_type == "subway"
-        else "minecraft parkour gameplay no commentary"
-    )
-    try:
-        result = subprocess.run([
-            "yt-dlp", f"ytsearch1:{search_term}",
-            "--match-filter", "duration < 600",
-            "-f", "worst[ext=mp4]/worst",
-            "-o", str(out_path),
-            "--no-playlist", "--quiet",
-        ], capture_output=True, timeout=60)
-        if out_path.exists():
-            logger.info(f"Downloaded {clip_type} clip via yt-dlp")
-            return str(out_path)
-    except Exception as e:
-        logger.warning(f"yt-dlp failed: {e} — using solid color fallback")
+def _file_ok(path: str) -> bool:
+    p = Path(path)
+    return p.exists() and p.stat().st_size > 50_000
 
-    # Last resort: solid color background
-    color = BRAINROT_COLORS.get(clip_type, "#111111")
-    logger.info(f"Generating solid color fallback for {clip_type}")
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-f", "lavfi",
-        "-i", f"color=c={color}:size=1080x960:rate=30",
-        "-t", str(duration),
-        "-c:v", "libx264", str(out_path)
-    ], capture_output=True)
-    return str(out_path)
+
+def _ffmpeg(cmd: list, timeout: int = 300) -> str:
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    return r.stderr.decode(errors="replace")
 
 
 def create_split_screen_video(content: dict, duration: int = 45) -> str:
     session     = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path    = BRAIN_DIR / f"brainrot_{session}.mp4"
-    top_clip    = get_background_clip("subway", duration)
-    bottom_clip = get_background_clip("minecraft", duration)
+    out_path    = str(BRAIN_DIR / f"brainrot_{session}.mp4")
+    top_clip    = str(ASSETS_DIR / "subway.mp4")
+    bottom_clip = str(ASSETS_DIR / "minecraft.mp4")
+    hook_safe   = _safe_text(content.get("hook", "MIND BLOWING FACTS"))
+    voice_path  = generate_voiceover(
+        content.get("hook", ""), content.get("points", []), session)
 
-    hook   = content.get("hook", "MIND BLOWING FACTS")
-    points = content.get("points", [])
+    logger.info("Creating split screen video...")
 
-    # FIX: generate TTS voiceover so the video has audio
-    voice_path = generate_voiceover(hook, points, session)
-
-    def _esc(text):
-        # Remove quotes entirely, escape special ffmpeg drawtext chars
-        return (text.replace("'", "")
-                    .replace('"', '')
-                    .replace(":", "\\:")
-                    .replace("%", "\\%")
-                    .replace("[", "")
-                    .replace("]", "")
-                    .replace(",", " "))
-
-    hook_safe = _esc(hook)
-    drawtext_filters = [
-        f"drawtext=text='{hook_safe}'"
-        f":fontsize=52:fontcolor=yellow:bordercolor=black:borderw=3"
-        f":x=(w-text_w)/2:y=80"
-        f":box=1:boxcolor=black@0.5:boxborderw=10"
-        f":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    ]
-
-    for i, point in enumerate(points[:5]):
-        start_time = 3 + (i * 7)
-        end_time   = start_time + 6
-        safe_point = _esc(point)
-        y_pos = 900 + (i * 80)
-        drawtext_filters.append(
-            f"drawtext=text='{safe_point}'"
-            f":fontsize=38:fontcolor=white:bordercolor=black:borderw=2"
-            f":x=(w-text_w)/2:y={y_pos}"
-            f":box=1:boxcolor=black@0.6:boxborderw=8"
-            f":enable='between(t\\,{start_time}\\,{end_time})'"
-            f":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        )
-
-    drawtext_str = ",".join(drawtext_filters)
-
-    # Build ffmpeg command — include audio if voiceover was generated
-    cmd = [
+    # Attempt 1: split screen + drawtext + audio
+    filter_v1 = (
+        f"[0:v]scale=1080:960,setsar=1[top];"
+        f"[1:v]scale=1080:960,setsar=1[bot];"
+        f"[top][bot]vstack=inputs=2[stk];"
+        f"[stk]drawtext=text='{hook_safe}'"
+        f":fontfile={FONT}:fontsize=60:fontcolor=yellow"
+        f":bordercolor=black:borderw=3"
+        f":x=(w-text_w)/2:y=50"
+        f":box=1:boxcolor=black@0.5:boxborderw=10[out]"
+    )
+    cmd1 = [
         "ffmpeg", "-y",
         "-stream_loop", "-1", "-i", top_clip,
         "-stream_loop", "-1", "-i", bottom_clip,
     ]
     if voice_path:
-        cmd += ["-i", voice_path]
-
-    filter_complex = (
-        f"[0:v]scale=1080:960,trim=duration={duration}[top];"
-        f"[1:v]scale=1080:960,trim=duration={duration}[bot];"
-        f"[top][bot]vstack=inputs=2[stacked];"
-        f"[stacked]{drawtext_str}[out]"
-    )
-    cmd += ["-filter_complex", filter_complex, "-map", "[out]"]
-
+        cmd1 += ["-i", voice_path]
+    cmd1 += ["-filter_complex", filter_v1, "-map", "[out]"]
     if voice_path:
-        # map audio from the 3rd input (index 2), trim to video duration
-        cmd += ["-map", "2:a", "-c:a", "aac", "-shortest"]
-
-    cmd += [
+        cmd1 += ["-map", "2:a", "-c:a", "aac", "-b:a", "128k"]
+    cmd1 += [
         "-t", str(duration),
         "-c:v", "libx264", "-preset", "fast",
-        "-b:v", "3500k", "-maxrate", "3500k", "-bufsize", "7000k",
-        "-r", "30", "-g", "60",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
-        str(out_path)
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        "-shortest", out_path
     ]
+    err = _ffmpeg(cmd1)
+    if _file_ok(out_path):
+        logger.info(f"✅ Split screen created: {out_path}")
+        return out_path
 
-    logger.info("Creating split screen video...")
-    result = subprocess.run(cmd, capture_output=True, timeout=300)
+    logger.error(f"Attempt 1 stderr: {err[-400:]}")
+    if os.path.exists(out_path): os.remove(out_path)
 
-    if not out_path.exists():
-        logger.error(f"FFmpeg failed: {result.stderr.decode()[-500:]}")
-        # Simple fallback without text overlay
-        fallback_cmd = [
-            "ffmpeg", "-y",
-            "-stream_loop", "-1", "-i", top_clip,
-            "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
-            "-t", str(duration), "-c:v", "libx264",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out_path)
-        ]
-        if voice_path:
-            fallback_cmd = [
-                "ffmpeg", "-y",
-                "-stream_loop", "-1", "-i", top_clip,
-                "-i", voice_path,
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
-                "-map", "0:v", "-map", "1:a", "-c:a", "aac", "-shortest",
-                "-t", str(duration), "-c:v", "libx264",
-                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out_path)
-            ]
-        subprocess.run(fallback_cmd, capture_output=True, timeout=120)
+    # Attempt 2: split screen, NO drawtext
+    filter_v2 = (
+        f"[0:v]scale=1080:960,setsar=1[top];"
+        f"[1:v]scale=1080:960,setsar=1[bot];"
+        f"[top][bot]vstack=inputs=2[out]"
+    )
+    cmd2 = [
+        "ffmpeg", "-y",
+        "-stream_loop", "-1", "-i", top_clip,
+        "-stream_loop", "-1", "-i", bottom_clip,
+    ]
+    if voice_path:
+        cmd2 += ["-i", voice_path]
+    cmd2 += ["-filter_complex", filter_v2, "-map", "[out]"]
+    if voice_path:
+        cmd2 += ["-map", "2:a", "-c:a", "aac"]
+    cmd2 += [
+        "-t", str(duration),
+        "-c:v", "libx264", "-preset", "fast",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        "-shortest", out_path
+    ]
+    err = _ffmpeg(cmd2)
+    if _file_ok(out_path):
+        logger.info(f"✅ Split screen (no text): {out_path}")
+        return out_path
 
-    logger.info(f"Split screen video created: {out_path}")
-    return str(out_path)
+    logger.error(f"Attempt 2 stderr: {err[-400:]}")
+    if os.path.exists(out_path): os.remove(out_path)
+
+    # Attempt 3: single clip full screen
+    cmd3 = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", top_clip]
+    if voice_path:
+        cmd3 += ["-i", voice_path, "-map", "0:v", "-map", "1:a", "-c:a", "aac"]
+    cmd3 += [
+        "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+        "-t", str(duration),
+        "-c:v", "libx264", "-preset", "ultrafast",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        "-shortest", out_path
+    ]
+    err = _ffmpeg(cmd3)
+    sz = Path(out_path).stat().st_size if Path(out_path).exists() else 0
+    logger.info(f"Attempt 3 result: {sz}b | stderr: {err[-200:]}")
+    return out_path
 
 
 def run_brainrot_pipeline() -> dict:
@@ -247,21 +179,15 @@ def run_brainrot_pipeline() -> dict:
         "video_path": None, "caption": None, "hashtags": [], "errors": [],
     }
     try:
-        content = generate_viral_text()
+        content            = generate_viral_text()
         result["topic"]    = content.get("topic")
+        result["title"]    = content.get("topic", "Brainrot")
         result["caption"]  = content.get("caption")
         result["hashtags"] = content.get("hashtags", [])
-        video_path = create_split_screen_video(content)
-        result["video_path"] = video_path
-        logger.info(f"Brainrot video ready: {video_path}")
+        result["video_path"] = create_split_screen_video(content)
+        logger.info(f"Brainrot video ready: {result['video_path']}")
     except Exception as e:
         logger.error(f"Brainrot pipeline failed: {e}", exc_info=True)
         result["errors"].append(str(e))
     result["completed_at"] = datetime.now().isoformat()
     return result
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    result = run_brainrot_pipeline()
-    print(json.dumps(result, indent=2))
