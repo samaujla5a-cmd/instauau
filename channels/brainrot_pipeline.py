@@ -112,20 +112,23 @@ def create_split_screen_video(content: dict, duration: int = 45) -> str:
     missing = [p for p in [top_clip, bottom_clip] if not os.path.exists(p)]
     if missing:
         raise FileNotFoundError(
-            f"Missing brainrot asset files: {missing}\\n"
+            f"Missing brainrot asset files: {missing}\n"
             "Add subway.mp4 and minecraft.mp4 to the assets/ folder in your repo."
         )
 
-    hook_safe   = _safe_text(content.get("hook", "MIND BLOWING FACTS"))
-    voice_path  = generate_voiceover(
+    hook_safe  = _safe_text(content.get("hook", "MIND BLOWING FACTS"))
+    voice_path = generate_voiceover(
         content.get("hook", ""), content.get("points", []), session)
 
     logger.info("Creating split screen video...")
 
     # ── Attempt 1: split screen + drawtext + audio ───────────────────────────
-    # IMPORTANT: -movflags +faststart is on EVERY attempt.  Without it the
-    # moov atom lands at the end of the file and Instagram rejects the video
-    # with "ftyp box not found" / "moov box not found".
+    # FIX: -t BEFORE -i forces FFmpeg to cut inputs at duration before passing
+    # them into filter_complex. Without this, -stream_loop + vstack deadlocks
+    # because FFmpeg waits for both infinite streams to end before flushing,
+    # producing 0 frames output (the frame=0 / time=N/A symptom seen in logs).
+    # IMPORTANT: -movflags +faststart on EVERY attempt — without it the moov
+    # atom lands at the end and Instagram rejects with "ftyp box not found".
     filter_v1 = (
         f"[0:v]scale=1080:960,setsar=1[top];"
         f"[1:v]scale=1080:960,setsar=1[bot];"
@@ -138,8 +141,9 @@ def create_split_screen_video(content: dict, duration: int = 45) -> str:
     )
     cmd1 = [
         "ffmpeg", "-y",
-        "-stream_loop", "-1", "-i", top_clip,
-        "-stream_loop", "-1", "-i", bottom_clip,
+        # -t before -i: pre-trim each looped input to exactly <duration> sec
+        "-stream_loop", "-1", "-t", str(duration), "-i", top_clip,
+        "-stream_loop", "-1", "-t", str(duration), "-i", bottom_clip,
     ]
     if voice_path:
         cmd1 += ["-i", voice_path]
@@ -153,7 +157,7 @@ def create_split_screen_video(content: dict, duration: int = 45) -> str:
         "-c:v", "libx264", "-preset", "fast",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
-        tmp_path,   # write to tmp first
+        tmp_path,
     ]
     err = _ffmpeg(cmd1)
     sz  = Path(tmp_path).stat().st_size if Path(tmp_path).exists() else 0
@@ -174,8 +178,9 @@ def create_split_screen_video(content: dict, duration: int = 45) -> str:
     )
     cmd2 = [
         "ffmpeg", "-y",
-        "-stream_loop", "-1", "-i", top_clip,
-        "-stream_loop", "-1", "-i", bottom_clip,
+        # -t before -i here too
+        "-stream_loop", "-1", "-t", str(duration), "-i", top_clip,
+        "-stream_loop", "-1", "-t", str(duration), "-i", bottom_clip,
     ]
     if voice_path:
         cmd2 += ["-i", voice_path]
@@ -203,7 +208,6 @@ def create_split_screen_video(content: dict, duration: int = 45) -> str:
         os.remove(tmp_path)
 
     # ── Attempt 3: single clip full screen ───────────────────────────────────
-    # NOTE: -movflags +faststart is still required here.
     cmd3 = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", top_clip]
     if voice_path:
         cmd3 += ["-i", voice_path, "-map", "0:v", "-map", "1:a",
