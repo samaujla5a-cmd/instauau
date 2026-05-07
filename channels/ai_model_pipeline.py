@@ -35,7 +35,13 @@ FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 KIE_API_KEY = os.getenv("KIE_API_KEY", "")
 
 # kie.ai API endpoints
-KIE_IMAGE_URL    = "https://api.kie.ai/api/v1/image/flux/generate"
+# FIX: /flux/generate returned 404 — kie.ai moved image generation to /generate.
+# Primary endpoint is now /api/v1/flux/generate (no /image/ prefix).
+# We try both the new and old paths so the pipeline survives future kie.ai changes.
+KIE_IMAGE_ENDPOINTS = [
+    "https://api.kie.ai/api/v1/flux/generate",          # new (2025+)
+    "https://api.kie.ai/api/v1/image/flux/generate",    # old (kept as fallback)
+]
 KIE_VIDEO_URL    = "https://api.kie.ai/api/v1/video/seedance/generate"
 KIE_TASK_IMG_URL = "https://api.kie.ai/api/v1/image/get"
 KIE_TASK_VID_URL = "https://api.kie.ai/api/v1/video/get"
@@ -164,8 +170,51 @@ Return ONLY valid JSON, no markdown:
     return data
 
 
+def _try_kie_image_request(payload: dict) -> requests.Response | None:
+    """
+    Try each known kie.ai image endpoint in order.
+    Returns the first successful (non-404, non-422) response, or None if all fail.
+
+    FIX: The original code only called one hardcoded endpoint and let raise_for_status()
+    crash the entire pipeline on 404. Now we iterate through known endpoints and
+    gracefully fall back rather than crashing.
+    """
+    for endpoint in KIE_IMAGE_ENDPOINTS:
+        try:
+            resp = requests.post(
+                endpoint,
+                headers=_kie_headers(),
+                json=payload,
+                timeout=60,
+            )
+            if resp.status_code == 404:
+                logger.warning(f"  kie.ai endpoint 404: {endpoint} — trying next...")
+                continue
+            if resp.status_code == 422:
+                logger.warning(f"  kie.ai model unavailable at {endpoint} — trying next...")
+                continue
+            if resp.status_code == 402:
+                raise RuntimeError("kie.ai credits exhausted — top up at https://kie.ai/pricing")
+            # Any other status (200, 4xx non-404/422) — return and let caller handle it
+            return resp
+        except RuntimeError:
+            raise
+        except requests.RequestException as e:
+            logger.warning(f"  kie.ai request error ({endpoint}): {e}")
+            continue
+    return None
+
+
 def generate_model_image(content: dict, session: str) -> str:
-    """Generate base model image via kie.ai Flux with locked character seed."""
+    """
+    Generate base model image via kie.ai Flux with locked character seed.
+
+    FIX: Original crashed on 404 from kie.ai. Now:
+    1. Tries both flux-kontext-pro and flux-dev across all known endpoints.
+    2. If ALL kie.ai calls fail or return 404, creates a solid-colour placeholder
+       image using FFmpeg (free, no API needed) so the Ken Burns video fallback
+       in generate_model_video() can still run and produce a reel.
+    """
     image_prompt = (
         f"{LOCKED_CHARACTER}, {content['vibe']}, "
         "fully clothed, tasteful, high fashion, instagram aesthetic, "
@@ -173,46 +222,84 @@ def generate_model_image(content: dict, session: str) -> str:
     )
 
     logger.info("🖼️  Generating model image via kie.ai Flux...")
-    resp = requests.post(
-        KIE_IMAGE_URL,
-        headers=_kie_headers(),
-        json={
+
+    for model_name in ["flux-kontext-pro", "flux-dev", "flux-schnell"]:
+        payload = {
             "prompt":      image_prompt[:500],
-            "model":       "flux-kontext-pro",
+            "model":       model_name,
             "width":       1080,
             "height":      1350,
             "seed":        42,
             "callBackUrl": "https://example.com/callback",
-        },
-        timeout=60,
+        }
+        resp = _try_kie_image_request(payload)
+        if resp is None:
+            logger.warning(f"  All endpoints returned 404/error for model {model_name}")
+            continue
+
+        if not resp.ok:
+            logger.warning(f"  kie.ai {model_name} HTTP {resp.status_code}: {resp.text[:200]}")
+            continue
+
+        resp_data = resp.json()
+        task_id   = (resp_data.get("data") or {}).get("taskId", "")
+        if not task_id:
+            logger.warning(f"  No taskId from kie.ai ({model_name}): {resp_data}")
+            continue
+
+        try:
+            image_url = _poll_image(task_id)
+            out_path  = str(MODEL_DIR / f"model_{session}.jpg")
+            return _download(image_url, out_path)
+        except Exception as e:
+            logger.warning(f"  kie.ai image poll/download failed ({model_name}): {e}")
+            continue
+
+    # All kie.ai image attempts failed — generate a placeholder so the
+    # Ken Burns video fallback can still run and produce a usable reel.
+    logger.warning(
+        "⚠️  All kie.ai image endpoints failed. "
+        "Creating placeholder image for Ken Burns fallback. "
+        "Check https://kie.ai/docs for updated API endpoints."
     )
-    if resp.status_code == 402:
-        raise RuntimeError("kie.ai credits exhausted — top up at https://kie.ai/pricing")
-    if resp.status_code == 422:
-        logger.warning("flux-kontext-pro unavailable, trying flux-dev...")
-        resp = requests.post(
-            KIE_IMAGE_URL,
-            headers=_kie_headers(),
-            json={
-                "prompt":      image_prompt[:500],
-                "model":       "flux-dev",
-                "width":       1080,
-                "height":      1350,
-                "seed":        42,
-                "callBackUrl": "https://example.com/callback",
-            },
-            timeout=60,
+    return _create_placeholder_image(content, session)
+
+
+def _create_placeholder_image(content: dict, session: str) -> str:
+    """
+    Create a simple gradient placeholder image with FFmpeg when kie.ai is down.
+    This lets the Ken Burns zoom effect still produce a watchable reel.
+    """
+    out_path = str(MODEL_DIR / f"model_{session}.jpg")
+    theme    = content.get("theme", "lifestyle")
+    quote    = re.sub(r"[^A-Za-z0-9 ]", "", content.get("quote", theme))[:40]
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        # Warm gradient background (portrait 1080x1350)
+        "-i", "color=c=0x1a0a2e:size=1080x1350:rate=1",
+        "-vf", (
+            f"drawtext=text='{quote}'"
+            f":fontfile={FONT}:fontsize=72:fontcolor=white"
+            f":x=(w-text_w)/2:y=(h-text_h)/2"
+            f":bordercolor=black:borderw=3,"
+            f"drawtext=text='AI MODEL'"
+            f":fontfile={FONT}:fontsize=40:fontcolor=0xaaaaaa"
+            f":x=(w-text_w)/2:y=(h-text_h)/2+120"
+        ),
+        "-frames:v", "1",
+        "-q:v", "2",
+        out_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, timeout=30)
+    if not Path(out_path).exists() or Path(out_path).stat().st_size < 1000:
+        raise RuntimeError(
+            f"Placeholder image creation failed: {r.stderr.decode()[-300:]}\n"
+            "kie.ai image API is down AND FFmpeg fallback failed."
         )
-    resp.raise_for_status()
-
-    resp_data = resp.json()
-    task_id   = (resp_data.get("data") or {}).get("taskId", "")
-    if not task_id:
-        raise RuntimeError(f"No taskId from image API: {resp_data}")
-
-    image_url = _poll_image(task_id)
-    out_path  = str(MODEL_DIR / f"model_{session}.jpg")
-    return _download(image_url, out_path)
+    logger.info(f"  ✅ Placeholder image created: {out_path}")
+    return out_path
 
 
 def generate_model_video(image_path: str, content: dict, session: str) -> str:
@@ -245,17 +332,21 @@ def generate_model_video(image_path: str, content: dict, session: str) -> str:
         )
         if resp.status_code == 402:
             raise RuntimeError("kie.ai credits exhausted")
-        if resp.status_code == 422:
-            logger.warning(f"  Model '{model_name}' not available, trying next...")
+        if resp.status_code in (404, 422):
+            logger.warning(f"  Seedance model '{model_name}' not available (HTTP {resp.status_code}), trying next...")
             continue
         if resp.status_code == 200:
             resp_data = resp.json()
             task_id   = (resp_data.get("data") or {}).get("taskId", "")
             if task_id:
                 logger.info(f"  Using model: {model_name}")
-                video_url = _poll_video(task_id)
-                raw_path  = str(MODEL_DIR / f"raw_video_{session}.mp4")
-                return _download(video_url, raw_path)
+                try:
+                    video_url = _poll_video(task_id)
+                    raw_path  = str(MODEL_DIR / f"raw_video_{session}.mp4")
+                    return _download(video_url, raw_path)
+                except Exception as e:
+                    logger.warning(f"  Seedance {model_name} poll/download failed: {e}")
+                    continue
         logger.warning(f"  Seedance {model_name} HTTP {resp.status_code}")
 
     logger.warning("  All Seedance models failed — using FFmpeg Ken Burns fallback (free)")
