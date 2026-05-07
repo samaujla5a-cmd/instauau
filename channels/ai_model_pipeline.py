@@ -177,28 +177,29 @@ def generate_model_image(content: dict, session: str) -> str:
         KIE_IMAGE_URL,
         headers=_kie_headers(),
         json={
-            "prompt": image_prompt[:500],
-            "model":  "flux-kontext-pro",
-            "width":  1080,
-            "height": 1350,
-            "seed":   42,  # LOCKED SEED = same face style every time
+            "prompt":      image_prompt[:500],
+            "model":       "flux-kontext-pro",
+            "width":       1080,
+            "height":      1350,
+            "seed":        42,
+            "callBackUrl": "https://example.com/callback",
         },
         timeout=60,
     )
     if resp.status_code == 402:
         raise RuntimeError("kie.ai credits exhausted — top up at https://kie.ai/pricing")
     if resp.status_code == 422:
-        # Try with default Flux model if kontext-pro not available
         logger.warning("flux-kontext-pro unavailable, trying flux-dev...")
         resp = requests.post(
             KIE_IMAGE_URL,
             headers=_kie_headers(),
             json={
-                "prompt": image_prompt[:500],
-                "model":  "flux-dev",
-                "width":  1080,
-                "height": 1350,
-                "seed":   42,
+                "prompt":      image_prompt[:500],
+                "model":       "flux-dev",
+                "width":       1080,
+                "height":      1350,
+                "seed":        42,
+                "callBackUrl": "https://example.com/callback",
             },
             timeout=60,
         )
@@ -216,8 +217,8 @@ def generate_model_image(content: dict, session: str) -> str:
 
 def generate_model_video(image_path: str, content: dict, session: str) -> str:
     """Animate the model image into a short video via kie.ai Seedance."""
-    motion       = content.get("video_motion_prompt", "slow cinematic push in, soft light, natural movement")
-    full_prompt  = (
+    motion      = content.get("video_motion_prompt", "slow cinematic push in, soft light, natural movement")
+    full_prompt = (
         f"{LOCKED_CHARACTER}, {content['vibe']}, "
         f"{motion}, cinematic, smooth motion, 4k quality"
     )
@@ -228,17 +229,17 @@ def generate_model_video(image_path: str, content: dict, session: str) -> str:
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode()
 
-    # Try seedance-2.0-fast first, fall back to seedance-1.0 if not available
     for model_name in ["seedance-2.0-fast", "seedance-1.0-fast", "seedance"]:
         resp = requests.post(
             KIE_VIDEO_URL,
             headers=_kie_headers(),
             json={
-                "prompt":   full_prompt[:500],
-                "image":    f"data:image/jpeg;base64,{img_b64}",
-                "model":    model_name,
-                "duration": 6,
-                "ratio":    "9:16",
+                "prompt":      full_prompt[:500],
+                "image":       f"data:image/jpeg;base64,{img_b64}",
+                "model":       model_name,
+                "duration":    6,
+                "ratio":       "9:16",
+                "callBackUrl": "https://example.com/callback",
             },
             timeout=60,
         )
@@ -257,7 +258,6 @@ def generate_model_video(image_path: str, content: dict, session: str) -> str:
                 return _download(video_url, raw_path)
         logger.warning(f"  Seedance {model_name} HTTP {resp.status_code}")
 
-    # All Seedance models failed — use free Ken Burns fallback
     logger.warning("  All Seedance models failed — using FFmpeg Ken Burns fallback (free)")
     return _ken_burns_fallback(image_path, content, session)
 
