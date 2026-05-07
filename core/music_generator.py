@@ -51,18 +51,15 @@ def _poll(task_id: str) -> dict:
             continue
 
         data   = resp.json()
-        # Safe navigation through response structure
         d      = data.get("data") or {}
         status = d.get("status", "PENDING")
         logger.info(f"  Suno [{task_id}]: {status} ({waited}s)")
 
         if status == "SUCCESS":
-            # kie.ai response: data.data.response.sunoData (list)
-            response = d.get("response") or {}
+            response  = d.get("response") or {}
             suno_list = response.get("sunoData") or []
             if suno_list and isinstance(suno_list, list):
                 return suno_list[0]
-            # Some kie.ai versions return differently — try flat response
             audio_url = response.get("audioUrl") or d.get("audioUrl") or ""
             if audio_url:
                 return response
@@ -108,8 +105,7 @@ def generate_song(concept: dict, suno_prompt: str = "") -> str:
         "instrumental": False,
         "model":        "V4",
         "vocalGender":  "m",
-        # Note: fetchLyrics is a kie.ai-specific param — included but handled gracefully
-        # if not returned (lyrics timestamps are optional enhancement)
+        "callBackUrl":  "https://example.com/callback",
         "fetchLyrics":  True,
     }
 
@@ -120,9 +116,28 @@ def generate_song(concept: dict, suno_prompt: str = "") -> str:
     if resp.status_code == 402:
         raise RuntimeError("kie.ai credits exhausted — top up at https://kie.ai/pricing")
     if resp.status_code == 422:
-        # Unprocessable entity — try without fetchLyrics
-        logger.warning("  kie.ai rejected fetchLyrics param, retrying without it...")
-        payload.pop("fetchLyrics", None)
+        resp_json = resp.json()
+        msg = str(resp_json.get("msg", "")).lower()
+        if "callback" in msg:
+            logger.warning("  kie.ai rejected callBackUrl, retrying with alternate format...")
+            payload["callBackUrl"] = "https://hooks.example.com/kie"
+        else:
+            logger.warning(f"  kie.ai 422: {resp_json.get('msg')} — retrying without fetchLyrics...")
+            payload.pop("fetchLyrics", None)
+        resp = requests.post(KIE_GENERATE_URL, headers=_headers(), json=payload, timeout=60)
+
+    # Final fallback: bare minimum payload only
+    if resp.status_code == 422:
+        logger.warning("  Still 422 — retrying with bare minimum payload...")
+        payload = {
+            "prompt":       payload["prompt"],
+            "style":        payload["style"],
+            "title":        payload["title"],
+            "customMode":   True,
+            "instrumental": False,
+            "model":        "V4",
+            "callBackUrl":  "https://example.com/callback",
+        }
         resp = requests.post(KIE_GENERATE_URL, headers=_headers(), json=payload, timeout=60)
 
     resp.raise_for_status()
@@ -135,7 +150,6 @@ def generate_song(concept: dict, suno_prompt: str = "") -> str:
 
     suno_data = _poll(task_id)
 
-    # Extract lyric timestamps — optional, enhances video but not required
     lyrics_ts = suno_data.get("lyrics") or suno_data.get("lyricTimestamps") or []
     if lyrics_ts and isinstance(lyrics_ts, list):
         concept["lyric_timestamps"] = lyrics_ts
@@ -144,7 +158,6 @@ def generate_song(concept: dict, suno_prompt: str = "") -> str:
         logger.info("  No lyric timestamps returned — video will use static lyrics")
         concept.setdefault("lyric_timestamps", [])
 
-    # Extract audio URL
     audio_url = (
         suno_data.get("audioUrl")
         or suno_data.get("audio_url")
