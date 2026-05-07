@@ -120,59 +120,46 @@ def _upload_to_public_url(file_path: str) -> str:
 
     Every candidate URL is validated with _looks_like_mp4() before being
     returned — if a host returns HTML, we move on to the next host.
+
+    FIX: transfer.sh and 0x0.st were both unreachable (network errors / timeouts)
+    in production. Added catbox.moe as the new primary host — it's reliable,
+    fast, serves raw MP4 bytes, and has no upload size cap for video.
+    Kept all original hosts as fallbacks in case catbox becomes unavailable.
     """
     filename  = Path(file_path).name
     file_size = os.path.getsize(file_path)
     logger.info(f"Hosting video for Instagram: {filename} ({file_size // 1024 // 1024}MB)")
 
-    # ── Host 1: transfer.sh ─────────────────────────────────────────────────
-    # PUT upload, returns a direct raw-content URL.  Well known, no JS wall.
-    try:
-        with open(file_path, "rb") as f:
-            resp = requests.put(
-                f"https://transfer.sh/{filename}",
-                data=f,
-                headers={"Content-Type": "video/mp4", "Max-Days": "1"},
-                timeout=180,
-            )
-        if resp.status_code == 200:
-            url = resp.text.strip()
-            if url.startswith("https://") and _looks_like_mp4(url):
-                logger.info(f"✅ Hosted at transfer.sh: {url}")
-                return url
-            logger.warning(f"transfer.sh URL failed MP4 check: {url[:80]}")
-        else:
-            logger.warning(f"transfer.sh returned HTTP {resp.status_code}")
-    except Exception as e:
-        logger.warning(f"transfer.sh failed: {e}")
-
-    # ── Host 2: 0x0.st ──────────────────────────────────────────────────────
-    # Long-running paste/file host.  multipart POST, returns plain URL.
+    # ── Host 1: catbox.moe (NEW PRIMARY) ────────────────────────────────────
+    # Anonymous upload, returns direct raw CDN link, no JS wall, no size limit.
+    # Much more reliable than transfer.sh / 0x0.st from Railway/Docker.
     try:
         with open(file_path, "rb") as f:
             resp = requests.post(
-                "https://0x0.st",
-                files={"file": (filename, f, "video/mp4")},
-                timeout=180,
+                "https://catbox.moe/user/api.php",
+                data={"reqtype": "fileupload", "userhash": ""},
+                files={"fileToUpload": (filename, f, "video/mp4")},
+                timeout=300,
             )
         if resp.status_code == 200 and resp.text.strip().startswith("https://"):
             url = resp.text.strip()
             if _looks_like_mp4(url):
-                logger.info(f"✅ Hosted at 0x0.st: {url}")
+                logger.info(f"✅ Hosted at catbox.moe: {url}")
                 return url
-            logger.warning(f"0x0.st URL failed MP4 check: {url[:80]}")
+            logger.warning(f"catbox.moe URL failed MP4 check: {url[:80]}")
         else:
-            logger.warning(f"0x0.st returned HTTP {resp.status_code}")
+            logger.warning(f"catbox.moe returned HTTP {resp.status_code}: {resp.text[:100]}")
     except Exception as e:
-        logger.warning(f"0x0.st failed: {e}")
+        logger.warning(f"catbox.moe failed: {e}")
 
-    # ── Host 3: tmpfiles.org ─────────────────────────────────────────────────
+    # ── Host 2: tmpfiles.org ─────────────────────────────────────────────────
+    # Was the successful fallback in logs — keeping it second.
     try:
         with open(file_path, "rb") as f:
             resp = requests.post(
                 "https://tmpfiles.org/api/v1/upload",
                 files={"file": (filename, f, "video/mp4")},
-                timeout=180,
+                timeout=300,
             )
         if resp.status_code == 200:
             data = resp.json()
@@ -188,8 +175,48 @@ def _upload_to_public_url(file_path: str) -> str:
     except Exception as e:
         logger.warning(f"tmpfiles failed: {e}")
 
-    # ── Host 4: filebin.net ──────────────────────────────────────────────────
-    # Last resort.  Validated carefully because it can return HTML pages.
+    # ── Host 3: transfer.sh ─────────────────────────────────────────────────
+    # PUT upload, returns a direct raw-content URL.
+    try:
+        with open(file_path, "rb") as f:
+            resp = requests.put(
+                f"https://transfer.sh/{filename}",
+                data=f,
+                headers={"Content-Type": "video/mp4", "Max-Days": "1"},
+                timeout=300,
+            )
+        if resp.status_code == 200:
+            url = resp.text.strip()
+            if url.startswith("https://") and _looks_like_mp4(url):
+                logger.info(f"✅ Hosted at transfer.sh: {url}")
+                return url
+            logger.warning(f"transfer.sh URL failed MP4 check: {url[:80]}")
+        else:
+            logger.warning(f"transfer.sh returned HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"transfer.sh failed: {e}")
+
+    # ── Host 4: 0x0.st ──────────────────────────────────────────────────────
+    try:
+        with open(file_path, "rb") as f:
+            resp = requests.post(
+                "https://0x0.st",
+                files={"file": (filename, f, "video/mp4")},
+                timeout=300,
+            )
+        if resp.status_code == 200 and resp.text.strip().startswith("https://"):
+            url = resp.text.strip()
+            if _looks_like_mp4(url):
+                logger.info(f"✅ Hosted at 0x0.st: {url}")
+                return url
+            logger.warning(f"0x0.st URL failed MP4 check: {url[:80]}")
+        else:
+            logger.warning(f"0x0.st returned HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"0x0.st failed: {e}")
+
+    # ── Host 5: filebin.net ──────────────────────────────────────────────────
+    # Last resort. Validated carefully because it can return HTML pages.
     try:
         bin_id = str(uuid.uuid4())[:8]
         with open(file_path, "rb") as f:
@@ -197,7 +224,7 @@ def _upload_to_public_url(file_path: str) -> str:
                 f"https://filebin.net/{bin_id}/{filename}",
                 data=f,
                 headers={"Content-Type": "video/mp4", "Accept": "application/json"},
-                timeout=180,
+                timeout=300,
             )
         if resp.status_code in (200, 201):
             url = f"https://filebin.net/{bin_id}/{filename}"
@@ -210,23 +237,21 @@ def _upload_to_public_url(file_path: str) -> str:
     except Exception as e:
         logger.warning(f"filebin failed: {e}")
 
-    # ── Host 5: oshi.at ──────────────────────────────────────────────────────
+    # ── Host 6: oshi.at ──────────────────────────────────────────────────────
     try:
         with open(file_path, "rb") as f:
             resp = requests.post(
                 "https://oshi.at",
                 files={"f": (filename, f, "video/mp4")},
                 data={"expire": "60"},
-                timeout=180,
+                timeout=300,
             )
         if resp.status_code == 200:
-            # oshi.at returns JSON with DL field
             try:
                 url = resp.json().get("DL", "")
             except Exception:
                 url = ""
             if not url:
-                # fallback: try to find https:// in text
                 import re as _re
                 m = _re.search(r"https://oshi\.at/\S+", resp.text)
                 url = m.group(0) if m else ""
@@ -241,7 +266,7 @@ def _upload_to_public_url(file_path: str) -> str:
 
     raise RuntimeError(
         "All video hosts failed the MP4 content check.\n"
-        "Hosts tried: transfer.sh, 0x0.st, tmpfiles.org, filebin.net, oshi.at\n"
+        "Hosts tried: catbox.moe, tmpfiles.org, transfer.sh, 0x0.st, filebin.net, oshi.at\n"
         "Check Railway outbound network settings."
     )
 
