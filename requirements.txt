@@ -1,0 +1,15 @@
+# Core
+python-dotenv>=1.0.0
+schedule>=1.2.0
+requests>=2.31.0
+
+# Audio
+pydub>=0.25.1
+
+# Free TTS
+edge-tts>=6.1.9
+gtts>=2.4.0
+
+# NOTE: moviepy, imageio, numpy, Pillow have been removed.
+# video_creator.py uses pure ffmpeg subprocesses — no Python video libs needed.
+# anthropic SDK removed — code uses Groq/Gemini REST APIs directly via requests.
