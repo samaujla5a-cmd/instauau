@@ -1,137 +1,52 @@
-"""
-RAP PIPELINE — Full Song + 4 Smart Reel Clips Per Run
-======================================================
-Flow per run:
-  1. Generate song concept + full lyrics (Groq/Gemini — free)
-  2. Generate real song via kie.ai Suno V4 (actual rap vocals + beat)
-  3. Build full-length cinematic video
-  4. Smart-trim into 4 hook clips
-  5. Upload all 4 clips to Instagram RAP account
-"""
-
-import os
-import sys
-import json
-import logging
-import subprocess
+import os, sys, json, logging
 from datetime import datetime
-
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dotenv import load_dotenv
-load_dotenv()
-
-from config import SONGS_DIR, SHORTS_DIR, LOGS_DIR, SEO
+from dotenv import load_dotenv; load_dotenv()
+from config import SONGS_DIR, SHORTS_DIR, VIDEOS_DIR, LOGS_DIR, SEO
 from core.lyrics_generator import generate_song_concept, generate_suno_music_prompt
 from core.music_generator import generate_song
-from core.video_creator import create_reel_clips
+from core.video_creator import create_full_video, trim_reel_clips
 from uploaders.instagram_uploader import upload_reel
-from core.telegram_notifier import (
-    notify_pipeline_start, notify_post_success, notify_post_failed
-)
+from core.telegram_notifier import notify_pipeline_start, notify_post_success, notify_post_failed
 
-
-def setup_logging():
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    log_file = os.path.join(LOGS_DIR, f"rap_{datetime.now().strftime('%Y%m%d')}.log")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-        handlers=[logging.FileHandler(log_file), logging.StreamHandler(sys.stdout)],
-    )
-
-
+STATE_FILE = Path(LOGS_DIR) / "rap_state.json"; os.makedirs(LOGS_DIR, exist_ok=True)
 logger = logging.getLogger("RAP_PIPELINE")
 
-
-def _audio_duration(audio_path: str) -> float:
+def _load_state():
     try:
-        r = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
-            capture_output=True, timeout=30,
-        )
-        if r.returncode == 0:
-            return float(r.stdout.decode().strip())
-    except subprocess.TimeoutExpired:
-        logger.warning(f"ffprobe timed out for {audio_path}")
-    except Exception as e:
-        logger.warning(f"ffprobe duration failed: {e}")
-    return 30.0
+        if STATE_FILE.exists(): return json.loads(STATE_FILE.read_text())
+    except: pass
+    return None
 
+def _save_state(state): STATE_FILE.write_text(json.dumps(state, indent=2))
+
+def _upload_clip(clip_path, concept, clip_index, dry_run=False):
+    hashtags = " ".join(SEO["instagram_hashtags_base"])
+    caption = f"🎵 {concept['title']} — Part {clip_index+1}\n\n{concept.get('instagram_caption','')}\n\n{hashtags}"
+    if not dry_run:
+        try:
+            rid = upload_reel(clip_path, {"caption": caption, "account_label": "RAP"})
+            notify_post_success("RAP", f"{concept['title']} pt{clip_index+1}", rid, clip_path); return rid
+        except Exception as e:
+            notify_post_failed("RAP", f"{concept['title']} pt{clip_index+1}", str(e)); return None
+    return f"DRY_{clip_index}"
+
+def _generate_new_batch(dry_run=False):
+    session = datetime.now().strftime("%Y%m%d_%H%M%S"); notify_pipeline_start("RAP")
+    concept = generate_song_concept()
+    audio_path = generate_song(concept, generate_suno_music_prompt(concept))
+    full_video = create_full_video(audio_path, concept)
+    clip_paths = trim_reel_clips(full_video, audio_path, concept, n=4)
+    _upload_clip(clip_paths[0], concept, 0, dry_run)
+    pending = [{"path": p, "clip_index": i} for i, p in enumerate(clip_paths[1:], start=1)]
+    _save_state({"pending_clips": pending, "concept": {"title": concept.get("title",""), "instagram_caption": concept.get("instagram_caption","")}, "generated_at": datetime.now().isoformat()})
 
 def run_full_pipeline(dry_run=False):
-    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    logger.info(f"🎵 RAP PIPELINE START | {session_id}")
-    notify_pipeline_start("RAP")
-
-    result = {
-        "session_id":  session_id,
-        "started_at":  datetime.now().isoformat(),
-        "song_title":  None,
-        "reels":       [],
-        "errors":      [],
-    }
-
-    hashtags = " ".join(SEO["instagram_hashtags_base"])
-
-    try:
-        # ── Step 1: Generate song concept + lyrics ────────────────────────
-        logger.info("[1/4] Generating song concept & lyrics...")
-        concept = generate_song_concept()
-        result["song_title"] = concept["title"]
-        logger.info(f"      Title: '{concept['title']}'")
-
-        # ── Step 2: Generate real song audio via kie.ai Suno V4 ──────────
-        logger.info("[2/4] Generating song audio via kie.ai Suno V4...")
-        suno_prompt = generate_suno_music_prompt(concept)
-        audio_path  = generate_song(concept, suno_prompt)
-        duration    = _audio_duration(audio_path)
-        logger.info(f"      Audio: {duration:.1f}s — {audio_path}")
-
-        # ── Step 3: Create 4 hook reel clips ──────────────────────────────
-        logger.info("[3/4] Smart-trimming into 4 reel clips...")
-        reel_paths = create_reel_clips(audio_path, concept, n_clips=4)
-        logger.info(f"      Created {len(reel_paths)} clips")
-
-        # ── Step 4: Upload each clip ──────────────────────────────────────
-        logger.info("[4/4] Uploading reels...")
-        for i, reel_path in enumerate(reel_paths):
-            caption = (
-                f"🎵 {concept['title']} — Part {i+1}\n\n"
-                f"{concept.get('instagram_caption', '')}\n\n"
-                f"{hashtags}"
-            )
-            if not dry_run:
-                try:
-                    reel_id = upload_reel(reel_path, {"caption": caption, "account_label": "RAP"})
-                    result["reels"].append({"id": reel_id, "title": concept["title"], "clip": i + 1})
-                    logger.info(f"      ✅ Reel {i+1} posted: {reel_id}")
-                    notify_post_success("RAP", f"{concept['title']} pt{i+1}", reel_id, reel_path)
-                except Exception as e:
-                    logger.error(f"      ❌ Reel {i+1} upload failed: {e}")
-                    result["errors"].append(f"reel_{i+1}: {e}")
-                    notify_post_failed("RAP", f"{concept['title']} pt{i+1}", str(e))
-            else:
-                logger.info(f"      [DRY RUN] Would upload: {reel_path}")
-                result["reels"].append({"id": f"DRY_{i}", "title": concept["title"], "clip": i + 1})
-
-    except Exception as e:
-        logger.error(f"PIPELINE FAILED: {e}", exc_info=True)
-        result["errors"].append(str(e))
-        notify_post_failed("RAP", result.get("song_title") or "Unknown", str(e))
-
-    result["completed_at"] = datetime.now().isoformat()
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    with open(os.path.join(LOGS_DIR, f"session_{session_id}.json"), "w") as f:
-        json.dump(result, f, indent=2)
-
-    logger.info(
-        f"DONE | '{result['song_title']}' | "
-        f"Reels: {len(result['reels'])} | Errors: {len(result['errors'])}"
-    )
-    return result
-
-
-if __name__ == "__main__":
-    setup_logging()
-    run_full_pipeline(dry_run="--dry-run" in sys.argv)
+    logger.info("RAP CHANNEL starting...")
+    state = _load_state()
+    if state and state.get("pending_clips"):
+        clip = state["pending_clips"].pop(0); _save_state(state); concept = state.get("concept",{})
+        if os.path.exists(clip["path"]): _upload_clip(clip["path"], concept, clip["clip_index"], dry_run)
+        else: _generate_new_batch(dry_run)
+    else: _generate_new_batch(dry_run)
