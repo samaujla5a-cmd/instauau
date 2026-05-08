@@ -1,6 +1,0 @@
-schedule
-python-dotenv
-requests
-edge-tts
-Pillow
-gradio_client
