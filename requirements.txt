@@ -1,0 +1,14 @@
+# Core
+python-dotenv>=1.0.0
+schedule>=1.2.0
+requests>=2.31.0
+
+# Audio
+pydub>=0.25.1
+
+# Free TTS (fallback for model pipeline voice)
+edge-tts>=6.1.9
+gtts>=2.4.0
+
+# NOTE: All AI APIs (kie.ai Suno, Flux, Seedance) use plain HTTP via requests.
+# No extra packages needed. moviepy/numpy/Pillow removed — pure FFmpeg subprocesses.
